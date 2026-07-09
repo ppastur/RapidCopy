@@ -60,6 +60,11 @@ class WebApp(bottle.Bottle):
     """
 
     _STREAM_POLL_INTERVAL_IN_MS = 100
+    # Emit a heartbeat comment if no real event has been sent for this long, so a
+    # dead/disconnected SSE client is detected promptly (the write raises, unwinding
+    # the generator and releasing its worker thread + listener queues) instead of
+    # the connection lingering and leaking a thread from the fixed server pool.
+    _STREAM_HEARTBEAT_INTERVAL_IN_S = 15
 
     def __init__(self, context: Context, controller: Controller):
         super().__init__()
@@ -141,15 +146,28 @@ class WebApp(bottle.Bottle):
                 handler.setup()
 
             # Get streaming values until the connection closes
+            last_activity = time.time()
             while not self._stop:
+                sent = False
                 for handler in handlers:
                     # Process all values from this handler
                     while True:
                         value = handler.get_value()
                         if value:
                             yield value
+                            sent = True
                         else:
                             break
+
+                now = time.time()
+                if sent:
+                    last_activity = now
+                elif now - last_activity >= WebApp._STREAM_HEARTBEAT_INTERVAL_IN_S:
+                    # No real events for a while: send an SSE comment as a heartbeat.
+                    # If the client is gone, this write fails and unwinds the
+                    # generator (finally -> cleanup), freeing the worker thread.
+                    yield ": ping\n\n"
+                    last_activity = now
 
                 time.sleep(WebApp._STREAM_POLL_INTERVAL_IN_MS / 1000)
 

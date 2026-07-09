@@ -7,6 +7,7 @@ This module provides an async validation worker that runs in a separate
 process to avoid blocking the main controller thread.
 """
 
+import logging
 import multiprocessing
 import os
 import queue
@@ -115,10 +116,16 @@ class ValidationDispatch:
     - Validation coordination
     """
 
+    # If an inline validation makes no download progress for this long, abandon it
+    # so a permanently-stalled download (e.g. stopped/failed mid-transfer) cannot
+    # block the whole validation queue behind it forever.
+    _INLINE_STALL_TIMEOUT_SECS = 900
+
     def __init__(self, config: ValidationConfig, sshcp: Sshcp, local_base_path: str, remote_base_path: str):
         self.config = config
         self._local_base_path = local_base_path
         self._remote_base_path = remote_base_path
+        self.logger = logging.getLogger(self.__class__.__name__)
 
         # Initialize components
         self._local_checksum = LocalChecksumGenerator(algorithm=config.algorithm)
@@ -132,12 +139,16 @@ class ValidationDispatch:
         self._active_remote_path: str | None = None
         self._active_inline: bool = False  # Whether active file is being inline-validated
         self._inline_local_sizes: dict[str, int] = {}  # local_path -> current bytes on disk
+        # Stall watchdog for inline validation (see _INLINE_STALL_TIMEOUT_SECS)
+        self._active_last_size: int = 0
+        self._active_last_progress_at: datetime | None = None
 
         # Redownload requests emitted when a corrupt chunk needs a partial re-fetch
         self._pending_redownloads: list[CorruptChunkRedownload] = []
 
     def set_base_logger(self, base_logger):
         """Set the base logger for all components."""
+        self.logger = base_logger.getChild(self.__class__.__name__)
         self._local_checksum.set_base_logger(base_logger)
         self._remote_checksum.set_base_logger(base_logger)
         self._chunk_manager.set_base_logger(base_logger)
@@ -196,6 +207,9 @@ class ValidationDispatch:
         self._active_file = local_path
         self._active_remote_path = remote_path
         self._active_inline = command.inline
+        # (Re)start the inline stall watchdog for this file
+        self._active_last_size = 0
+        self._active_last_progress_at = datetime.now()
 
         # Get remote checksums first (batched for efficiency)
         validation_info = self._chunk_manager.get_validation_info(local_path)
@@ -293,7 +307,27 @@ class ValidationDispatch:
         if self._active_inline:
             all_pending = self._chunk_manager.get_pending_chunks(local_path)
             if all_pending:
-                # Download hasn't reached these chunks yet; wait
+                # Download hasn't reached these chunks yet; wait — but guard
+                # against a permanently-stalled download blocking the queue.
+                current_size = self._inline_local_sizes.get(local_path, 0)
+                if current_size > self._active_last_size:
+                    # Made progress: bytes arrived since last check, reset watchdog
+                    self._active_last_size = current_size
+                    self._active_last_progress_at = datetime.now()
+                elif (
+                    self._active_last_progress_at is not None
+                    and (datetime.now() - self._active_last_progress_at).total_seconds()
+                    > self._INLINE_STALL_TIMEOUT_SECS
+                ):
+                    self.logger.warning(
+                        "Inline validation for '%s' stalled with no download progress for %ds; "
+                        "abandoning it so the validation queue can proceed.",
+                        local_path,
+                        self._INLINE_STALL_TIMEOUT_SECS,
+                    )
+                    self._chunk_manager.remove_file(local_path)
+                    self._active_file = None
+                    self._inline_local_sizes.pop(local_path, None)
                 return None
 
         # All chunks processed, check results

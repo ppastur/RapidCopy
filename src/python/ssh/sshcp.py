@@ -124,7 +124,12 @@ class Sshcp:
             self.logger.exception("Timed out")
             self.logger.error("Command output before:\n{}".format(sp.before))
             raise SshcpError("Timed out") from e
-        sp.close()
+        finally:
+            # Always close the pexpect child, otherwise every error/timeout path
+            # leaks the ssh/scp subprocess and its pty file descriptor, eventually
+            # exhausting the fd limit ("Too many open files"). close() also reaps
+            # the child so exitstatus below is populated.
+            sp.close()
         end_time = time.time()
 
         self.logger.debug("Return code: {}".format(sp.exitstatus))

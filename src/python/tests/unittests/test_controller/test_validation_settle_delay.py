@@ -12,6 +12,7 @@ dirty pages written by LFTP's parallel pget before the validator begins hashing.
 import os
 import time
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch, call
 
 from common import ValidationConfig
@@ -95,3 +96,70 @@ class TestValidationSettleDelay(unittest.TestCase):
         command = self._make_command(inline=False)
         dispatch._start_validation(command)
         mock_sleep.assert_called_once_with(delay)
+
+
+class TestInlineStallWatchdog(unittest.TestCase):
+    """Tests the watchdog that abandons an inline validation whose download stalls."""
+
+    def _make_dispatch(self) -> ValidationDispatch:
+        config = ValidationConfig(
+            settle_delay_secs=0.0,
+            default_chunk_size=1024 * 1024,
+            min_chunk_size=1024 * 1024,
+            max_chunk_size=100 * 1024 * 1024,
+        )
+        return ValidationDispatch(
+            config=config, sshcp=MagicMock(), local_base_path="/local", remote_base_path="/remote"
+        )
+
+    @staticmethod
+    def _stub_chunk_manager(dispatch, pending_chunk_end_offset):
+        info = MagicMock()
+        info.full_file_checksum = None
+        info.local_full_checksum = None
+        chunk = MagicMock()
+        chunk.end_offset = pending_chunk_end_offset
+        cm = MagicMock()
+        cm.get_validation_info.return_value = info
+        cm.get_pending_chunks.return_value = [chunk]
+        dispatch._chunk_manager = cm
+        return cm
+
+    def test_stalled_inline_validation_is_abandoned(self):
+        """Active inline file with no download progress past the timeout is dropped."""
+        d = self._make_dispatch()
+        path = "/local/test.mkv"
+        d._active_file = path
+        d._active_inline = True
+        d._inline_local_sizes[path] = 0
+        d._active_last_size = 0
+        d._active_last_progress_at = datetime.now() - timedelta(
+            seconds=ValidationDispatch._INLINE_STALL_TIMEOUT_SECS + 1
+        )
+        cm = self._stub_chunk_manager(d, pending_chunk_end_offset=1024 * 1024)
+
+        result = d._continue_validation()
+
+        self.assertIsNone(result)
+        self.assertIsNone(d._active_file)  # abandoned so the queue can proceed
+        cm.remove_file.assert_called_once_with(path)
+
+    def test_download_progress_resets_watchdog(self):
+        """Bytes arriving since the last check reset the watchdog; file is NOT abandoned."""
+        d = self._make_dispatch()
+        path = "/local/test.mkv"
+        d._active_file = path
+        d._active_inline = True
+        d._inline_local_sizes[path] = 5 * 1024 * 1024  # progress since last check
+        d._active_last_size = 0
+        stale = datetime.now() - timedelta(seconds=ValidationDispatch._INLINE_STALL_TIMEOUT_SECS + 1)
+        d._active_last_progress_at = stale
+        cm = self._stub_chunk_manager(d, pending_chunk_end_offset=100 * 1024 * 1024)
+
+        result = d._continue_validation()
+
+        self.assertIsNone(result)
+        self.assertEqual(d._active_file, path)  # still active
+        self.assertEqual(d._active_last_size, 5 * 1024 * 1024)
+        self.assertGreater(d._active_last_progress_at, stale)  # watchdog reset
+        cm.remove_file.assert_not_called()

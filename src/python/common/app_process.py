@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import time
 from abc import abstractmethod
 from multiprocessing import Process, Queue, Event
 import queue
@@ -110,7 +111,9 @@ class AppProcess(Process):
 
         timestamp_start = datetime.now()
         while self.is_alive() and elapsed_ms(timestamp_start) < AppProcess.__DEFAULT_TERMINATE_TIMEOUT_MS:
-            pass
+            # Sleep briefly instead of a tight spin so we don't peg a CPU core
+            # while waiting (up to the timeout) for the process to exit gracefully.
+            time.sleep(0.01)
 
         super().terminate()
 

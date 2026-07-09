@@ -1,6 +1,6 @@
 # Copyright 2017, Inderpreet Singh, All rights reserved.
 
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from typing import TypeVar, Generic, Optional
 
 
@@ -13,12 +13,30 @@ class StreamQueue(Generic[T]):
     Useful for web streams that wait for listener events from other threads.
     The producer thread calls put() to insert events. The consumer stream
     calls get_next_event() to receive event in its own thread.
+
+    The queue is bounded: if a consumer stalls (e.g. a dead SSE client not yet
+    reaped), the oldest events are dropped rather than growing memory without
+    bound. Dropped events are harmless in practice — a reconnecting client
+    receives a fresh full snapshot.
     """
+    __MAX_SIZE = 10000
+
     def __init__(self):
-        self.__queue = Queue()
+        self.__queue = Queue(maxsize=StreamQueue.__MAX_SIZE)
 
     def put(self, event: T):
-        self.__queue.put(event)
+        try:
+            self.__queue.put(event, block=False)
+        except Full:
+            # Drop the oldest event to make room, then enqueue the newest.
+            try:
+                self.__queue.get(block=False)
+            except Empty:
+                pass
+            try:
+                self.__queue.put(event, block=False)
+            except Full:
+                pass
 
     def get_next_event(self) -> T | None:
         """

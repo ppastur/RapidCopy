@@ -66,6 +66,11 @@ class MyWSGIRefServer(bottle.ServerAdapter):
     Copied from: https://stackoverflow.com/a/16056443
     """
     quiet = True  # disable logging to stdout
+    # Backstop for half-open connections: a send/recv that blocks longer than this
+    # raises socket.timeout, freeing the worker thread from the fixed paste pool.
+    # Generously larger than the SSE heartbeat interval so healthy streams are
+    # never interrupted (the heartbeat is the primary dead-client detector).
+    __SOCKET_TIMEOUT_S = 300
 
     def __init__(self, logger: logging.Logger, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -78,6 +83,7 @@ class MyWSGIRefServer(bottle.ServerAdapter):
         handler = TransLogger(handler, logger=self.logger, setup_console_handler=(not self.quiet))
         self.server = httpserver.serve(handler, host=self.host, port=str(self.port), start_loop=False,
                                        handler=MyWSGIHandler,
+                                       socket_timeout=MyWSGIRefServer.__SOCKET_TIMEOUT_S,
                                        **self.options)
         self.server.serve_forever()
 
