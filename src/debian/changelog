@@ -1,3 +1,20 @@
+rapidcopy (1.0.0) stable; urgency=medium
+
+  * rclone transfer engine: multi-threaded SFTP streaming with tuned defaults
+    for 1080p+ media (~3.8x faster single-file throughput on benchmarked link)
+  * New-instance defaults tuned for large files (parallel streams/connections)
+  * Data-integrity hardening: chunked xxh128 validation with partial
+    re-download; validation stall watchdog; download/persist race fixes
+  * API-key authentication on all /server/* routes (LAN-bind + required key);
+    UI auto-authenticates, external callers use X-Api-Key / ?apikey=
+  * Security: removed pickle RCE vector, zip-slip containment, shlex-quoted
+    shell paths, credential redaction, CIFS creds via 0600 tempfile
+  * UX: distinct asc/desc dashboard sorts (ETA/speed), bulk actions with
+    confirm, ACTIVE filter, collapsible Path Pairs and Network Mounts
+  * Updated README (rclone, high-throughput transfers, authentication)
+
+ -- RapidCopy Maintainers <maintainers@rapidcopy.app>  Sun, 12 Jul 2026 12:00:00 -0700
+
 rapidcopy (0.9.0) stable; urgency=low
 
   * Rebranded from SeedSync to RapidCopy
