@@ -1,6 +1,6 @@
 # RapidCopy
 
-**A modernized fork of [SeedSync](https://github.com/ipsingh06/seedsync)** - Fast file synchronization from remote Linux servers using LFTP.
+**A modernized fork of [SeedSync](https://github.com/ipsingh06/seedsync)** - Fast file synchronization from remote Linux servers using rclone with multi-threaded SFTP streaming.
 
 <p align="center">
   <a href="https://github.com/rccypher/RapidCopy">
@@ -22,13 +22,21 @@
 
 ## What is RapidCopy?
 
-RapidCopy automatically syncs files from a remote Linux server to your local machine. It connects via SSH, monitors remote directories for new files, and downloads them using [LFTP](http://lftp.tech/) - the fastest file transfer program available. Once downloaded, files are optionally validated and extracted, all managed through a modern web UI.
+RapidCopy automatically syncs files from a remote Linux server to your local machine. It connects via SSH, monitors remote directories for new files, and downloads them over SSH using [rclone](https://rclone.org/) with multi-threaded SFTP streaming for high throughput. Once downloaded, files are optionally validated and extracted, all managed through a modern web UI.
 
 You don't need to install anything on the remote server. All you need are SSH credentials.
 
 ## Features Added Since SeedSync
 
 RapidCopy is a comprehensive rewrite and modernization of the original SeedSync project. The following features have been added since forking:
+
+### High-Throughput Transfers (rclone backend)
+
+The transfer engine was replaced with [rclone](https://rclone.org/) over SFTP. Large (1080p+) files are split across **multiple parallel streams**, which on a benchmarked seedbox→home link raised single-file throughput from ~13 MB/s (single stream) to ~49 MB/s (**~3.8× faster**).
+
+- Multi-threaded streaming with tuned defaults (`--multi-thread-streams`, `--multi-thread-cutoff`, buffer/mmap)
+- Per-file and per-directory concurrency limits, plus a total-connection ceiling
+- Integrity is provided by the built-in chunked validation (below), so the redundant full-file transfer hash is skipped by default for speed
 
 ### Multiple Path Pairs
 
@@ -44,7 +52,7 @@ Sync multiple remote/local directory combinations in a single RapidCopy instance
 Automatically verify file integrity after download by comparing chunk-level checksums between remote and local copies. This catches silent corruption, incomplete transfers, and bit-rot before you rely on the downloaded files.
 
 - **Chunk-based validation** - Files are split into chunks and each chunk is checksummed independently, allowing identification of exactly which portions are corrupt
-- **Supported algorithms** - MD5 (default), SHA-256, SHA-1
+- **Supported algorithms** - xxh128 (default; fast, non-cryptographic), MD5, SHA-256, SHA-1
 - **Adaptive chunk sizing** - Chunk size automatically scales based on file size (larger chunks for bigger files), network speed, and historical failure rate
 - **Automatic retry** - Corrupt chunks are re-downloaded and re-validated up to a configurable number of retries
 - **File states** - Files progress through VALIDATING, VALIDATED, or CORRUPT states with dedicated status icons in the UI
@@ -92,7 +100,7 @@ Optional auto-update support via an external update server. Check for and apply 
 3. Set up path pairs mapping remote directories to local destinations
 4. RapidCopy scans remote directories on a configurable interval
 5. New files are auto-queued for download (or manually queued)
-6. LFTP handles the actual transfer with parallel connections
+6. rclone transfers each file over SFTP, splitting large files across parallel streams for high throughput
 7. Downloaded files are optionally validated and/or extracted
 8. Monitor everything through the web UI
 
@@ -113,8 +121,8 @@ docker run -d \
   -p 8800:8800 \
   -v /path/to/config:/config \
   -v /path/to/downloads:/downloads \
-  -v ~/.ssh:/home/rapidcopy/.ssh:ro \
-  rapidcopy:latest
+  -v ~/.ssh/id_rsa:/home/rapidcopy/.ssh/id_rsa:ro \
+  rccypher/rapidcopy:latest
 ```
 
 For multiple download destinations, add additional volume mounts:
@@ -126,11 +134,22 @@ docker run -d \
   -v /path/to/config:/config \
   -v /path/to/tv_downloads:/downloads/tv_shows \
   -v /path/to/movie_downloads:/downloads/movies \
-  -v ~/.ssh:/home/rapidcopy/.ssh:ro \
-  rapidcopy:latest
+  -v ~/.ssh/id_rsa:/home/rapidcopy/.ssh/id_rsa:ro \
+  rccypher/rapidcopy:latest
 ```
 
 Access the web UI at `http://localhost:8800`
+
+### Authentication
+
+RapidCopy generates a random **API key** on first startup and stores it in the config (`[Web] api_key` in `settings.cfg`). All `/server/*` API routes require it. The web UI — served over your trusted LAN — receives the key automatically (injected into the page) and authenticates itself, so you just open the page.
+
+For **external or scripted API access**, read the key from the config and send it as an `X-Api-Key` header (or a `?apikey=` query parameter for the SSE stream):
+
+```bash
+# Retrieve the generated key
+docker exec rapidcopy grep '^api_key' /config/settings.cfg
+```
 
 ### Docker Compose
 
@@ -138,7 +157,7 @@ Access the web UI at `http://localhost:8800`
 services:
   rapidcopy:
     build: .
-    image: rapidcopy:latest
+    image: rccypher/rapidcopy:latest
     container_name: rapidcopy
     restart: unless-stopped
     ports:
@@ -146,7 +165,7 @@ services:
     volumes:
       - ./config:/config
       - /path/to/downloads:/downloads
-      - ~/.ssh:/home/rapidcopy/.ssh:ro
+      - ~/.ssh/id_rsa:/home/rapidcopy/.ssh/id_rsa:ro
 ```
 
 ## Configuration
@@ -186,7 +205,7 @@ Configured via the Settings UI or `path_pairs.json` in your config directory:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `True` | Enable post-download file validation |
-| `algorithm` | `md5` | Hash algorithm (`md5`, `sha256`, `sha1`) |
+| `algorithm` | `xxh128` | Hash algorithm (`xxh128`, `md5`, `sha256`, `sha1`) |
 | `default_chunk_size` | `52428800` (50MB) | Base chunk size for validation |
 | `max_chunk_size` | `104857600` (100MB) | Maximum chunk size after adaptive scaling |
 | `validate_after_file` | `True` | Validate immediately after each file completes |
@@ -247,7 +266,7 @@ RapidCopy/
 │   ├── python/              # Python backend
 │   │   ├── common/          # Shared utilities, config, models
 │   │   ├── controller/      # Business logic, scanning, validation
-│   │   ├── lftp/            # LFTP integration
+│   │   ├── rclone/          # rclone transfer backend (SFTP, multi-threaded)
 │   │   ├── model/           # Data models (ModelFile, states)
 │   │   ├── ssh/             # SSH utilities
 │   │   ├── system/          # File system operations
